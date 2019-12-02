@@ -14,6 +14,8 @@ import urllib.request
 import requests
 import logging
 import os
+import time
+from PyPDF2 import PdfFileReader    
 
 #from boxx import p,g
 
@@ -24,6 +26,9 @@ class pygmail(object):
         self.M = None
         self.response = None
         self.mailboxes = []
+        self.papers=[]
+        self.success_num = 0
+        self.fail_num = 0
         
         # set tmp dir
         self.tmp_dir='tmp_dir'
@@ -60,14 +65,26 @@ class pygmail(object):
                         body=part.get_payload(decode=True)
                         body_str=body.decode('utf-8')
                         paper_list=re.findall(pattern,body_str)
-                        for paper_idx,paper in enumerate(paper_list):
+                        for paper_idx in range(0,len(paper_list)):
+                            if paper_idx>= len(paper_list):
+                                break    
+                            
                             # replace invalid characters
+                            paper=paper_list[paper_idx]
                             paper=re.sub(u"\\<.*?\\>", "", paper)
                             paper=paper.replace('&#39;','\'')
                             paper=paper.replace('” ','')
                             paper=paper.strip('.\\"')
+                            paper=paper.strip('?')
                             paper=paper.replace(':','_')
-                            paper_list[paper_idx]=paper
+                            
+                            # remove duplicate paper
+                            if paper in self.papers:
+                                paper_list.remove(paper_list[paper_idx])
+                                paper_idx=paper_idx-1
+                            else:
+                                paper_list[paper_idx]=paper
+                                self.papers.append(paper)
                         body_list.append(paper_list)
         return ret,body_list
    
@@ -103,17 +120,20 @@ class pygmail(object):
         cj = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
         req = urllib.request.Request(url=url, headers=header_dict)
+
         try :
             response = opener.open(req)
-        except UnicodeEncodeError :
+            data = response.read()
+            data = data.decode()
+        except Exception :
             return 0
 
-        data = response.read()
-        data = data.decode()
+
         pattern = re.compile(r'href="(http.+?.pdf)"')
         result1 = re.findall(pattern, data)
         pattern2 = re.compile(r'href="(http.+?/pdf.+?)"')
         result2 = re.findall(pattern2, data)
+        
         if result1:
             result = result1[0]
         elif result2:
@@ -121,28 +141,58 @@ class pygmail(object):
         else:
             return 0
         
+        # write pdf
         try:
             imgres = requests.get(result)
-        except ConnectionError :
+        except Exception :
             return 0
-        
         try:
-            with open(self.tmp_dir+"\\{}.pdf".format(paper), "wb") as f:
+            pdf_name=self.tmp_dir+"\\{}.pdf".format(paper)
+            with open(pdf_name, "wb") as f:
                 if not f:
                     return 0
                 f.write(imgres.content)
-                return 1
-        except FileNotFoundError :
+        except Exception :
             return 0
         
+        # check if pdf is valid
+        try:
+            reader = PdfFileReader(pdf_name)
+            if reader.getNumPages() < 1:
+                    os.remove(pdf_name)
+                    return 0
+            else:
+                    return 1
+        except Exception :
+            os.remove(pdf_name)
+            return 0      
+        
     def download_all_papers(self,papers_list):
-        for list_idx,paper_list in enumerate(papers_list):
-            for idx,paper in enumerate(paper_list):
-                ret = self.download_from_googlescholar(paper)
-                if ret==1:
-                    self.logger.info('[Success] download %d/%d in mail %d/%d [title]:%s'%(idx+1,len(paper_list),list_idx+1,len(papers_list),paper))
-                else:
-                    self.logger.warning('[Fail] download %d/%d in mail %d/%d [title]:%s'%(idx+1,len(paper_list),list_idx+1,len(papers_list),paper))     
+        for idx,paper in enumerate(papers_list):
+            time_start=time.time()
+            ret = self.download_from_googlescholar(paper)
+            time_end=time.time()
+            if ret==1:
+                self.success_num = self.success_num + 1
+                self.logger.info('[Success] download %d/%d within %ds [title]:%s'%(self.success_num+self.fail_num,len(self.papers),time_end-time_start,paper))
+#                    self.logger.info('[Success] download %d/%d in mail %d/%d within %ds [title]:%s'%(idx+1,len(paper_list),list_idx+1,len(papers_list),time_end-time_start,paper))
+            else:
+                self.fail_num = self.fail_num + 1
+                self.logger.warning('[Fail] download %d/%d within %ds [title]:%s'%(self.success_num+self.fail_num,len(self.papers),time_end-time_start,paper))     
+#                    self.logger.warning('[Fail] download %d/%d in mail %d/%d within %ds [title]:%s'%(idx+1,len(paper_list),list_idx+1,len(papers_list),time_end-time_start,paper)) 
+#        for list_idx,paper_list in enumerate(papers_list):
+#            for idx,paper in enumerate(paper_list):
+#                time_start=time.time()
+#                ret = self.download_from_googlescholar(paper)
+#                time_end=time.time()
+#                if ret==1:
+#                    self.success_num = self.success_num + 1
+#                    self.logger.info('[Success] download %d/%d within %ds [title]:%s'%(self.success_num+self.fail_num,len(self.papers),time_end-time_start,paper))
+##                    self.logger.info('[Success] download %d/%d in mail %d/%d within %ds [title]:%s'%(idx+1,len(paper_list),list_idx+1,len(papers_list),time_end-time_start,paper))
+#                else:
+#                    self.fail_num = self.fail_num + 1
+#                    self.logger.warning('[Fail] download %d/%d within %ds [title]:%s'%(self.success_num+self.fail_num,len(self.papers),time_end-time_start,paper))     
+##                    self.logger.warning('[Fail] download %d/%d in mail %d/%d within %ds [title]:%s'%(idx+1,len(paper_list),list_idx+1,len(papers_list),time_end-time_start,paper))     
         return 1
     def logout(self):
         self.M.logout()
@@ -157,7 +207,7 @@ if __name__ =="__main__":
     ret,papers=demo.parse_paper_in_mail(mail)
     assert ret==1
         
-    ret = demo.download_all_papers(papers)
+    ret = demo.download_all_papers(demo.papers)
     assert ret==1
     demo.logout()
-    print('All works are done, please download failed papers manually!')
+    print('All works are done, %d in %d papers downloaded, please download %d failed papers manually!'%(demo.success_num,len(demo.papers),demo.fail_num))
